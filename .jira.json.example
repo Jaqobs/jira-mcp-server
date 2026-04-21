@@ -1,0 +1,5 @@
+{
+  "project_key": "PROJ",
+  "fetch_statuses": ["To Do", "In Progress"],
+  "max_results": 50
+}

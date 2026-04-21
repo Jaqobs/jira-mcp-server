@@ -31,18 +31,41 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and fill in:
+Edit `.env` and fill in your credentials. These are shared across all projects and should never be committed:
 
 | Variable | Description |
 |---|---|
 | `JIRA_BASE_URL` | Your Atlassian base URL, e.g. `https://acme.atlassian.net` |
 | `JIRA_EMAIL` | Your Atlassian account email |
 | `JIRA_API_TOKEN` | API token from https://id.atlassian.com/manage-profile/security/api-tokens |
-| `JIRA_PROJECT_KEY` | Your Jira project key, e.g. `ACME` |
 
-### 3. Configure which statuses to fetch
+### 3. Add a .jira.json to each project
 
-Edit `config.json` to match the column names on your Jira board:
+In the root of each project you want to connect to a Jira board, create a `.jira.json` file:
+
+```json
+{
+  "project_key": "ACME"
+}
+```
+
+The server walks up from the current working directory to the nearest `.git` root looking for this file, so it automatically picks up the right board for whichever project you are working in.
+
+You can also override the default fetch settings per project:
+
+```json
+{
+  "project_key": "ACME",
+  "fetch_statuses": ["In Progress", "In Review"],
+  "max_results": 25
+}
+```
+
+Status names are case-sensitive and must match exactly what appears in Jira. If no `.jira.json` is found, the server falls back to the `JIRA_PROJECT_KEY` environment variable.
+
+### 4. Configure global defaults (optional)
+
+Edit `config.json` in the server directory to set the default statuses and result limit used when a project does not override them:
 
 ```json
 {
@@ -51,9 +74,7 @@ Edit `config.json` to match the column names on your Jira board:
 }
 ```
 
-Status names are case-sensitive and must match exactly what appears in Jira.
-
-### 4. Register with Claude Code
+### 5. Register with Claude Code
 
 ```bash
 claude mcp add jira \
@@ -93,10 +114,11 @@ ACME-42: Add user authentication flow
 ## Project structure
 
 ```
-├── server.py          # MCP server — registers tools
-├── jira_client.py     # Async Jira REST API v3 client
-├── config.json        # Configurable statuses and result limit
-├── .env.example       # Credential template
+├── server.py              # MCP server — registers tools
+├── jira_client.py         # Async Jira REST API v3 client
+├── config.json            # Global default statuses and result limit
+├── .env.example           # Credential template
+├── .jira.json.example     # Per-project config template
 ├── requirements.txt
 └── tests/
     └── test_jira_client.py

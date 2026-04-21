@@ -15,7 +15,7 @@ load_dotenv()
 
 app = Server("jira-mcp-server")
 
-REQUIRED_ENV_VARS = ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_PROJECT_KEY"]
+REQUIRED_ENV_VARS = ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"]
 
 
 def _check_env() -> list[str]:

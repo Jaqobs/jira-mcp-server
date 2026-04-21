@@ -97,12 +97,79 @@ def test_iso_to_unix_invalid():
 
 # --- get_active_issues ---
 
+# --- _find_project_config ---
+
+def test_find_project_config_returns_empty_when_no_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert jira_client._find_project_config() == {}
+
+
+def test_find_project_config_loads_jira_json(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".jira.json").write_text(json.dumps({"project_key": "MYPROJ"}))
+    monkeypatch.chdir(tmp_path)
+    assert jira_client._find_project_config() == {"project_key": "MYPROJ"}
+
+
+def test_find_project_config_walks_up_to_git_root(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".jira.json").write_text(json.dumps({"project_key": "ROOT"}))
+    subdir = tmp_path / "src" / "feature"
+    subdir.mkdir(parents=True)
+    monkeypatch.chdir(subdir)
+    assert jira_client._find_project_config() == {"project_key": "ROOT"}
+
+
+def test_find_project_config_stops_at_git_root(tmp_path, monkeypatch):
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (parent / ".jira.json").write_text(json.dumps({"project_key": "PARENT"}))
+    (child / ".git").mkdir()
+    monkeypatch.chdir(child)
+    assert jira_client._find_project_config() == {}
+
+
+# --- _project_key ---
+
+def test_project_key_from_jira_json(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".jira.json").write_text(json.dumps({"project_key": "BOARD"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JIRA_PROJECT_KEY", raising=False)
+    assert jira_client._project_key() == "BOARD"
+
+
+def test_project_key_falls_back_to_env(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "ENVPROJ")
+    assert jira_client._project_key() == "ENVPROJ"
+
+
+def test_project_key_jira_json_takes_precedence_over_env(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".jira.json").write_text(json.dumps({"project_key": "FROMFILE"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "FROMENV")
+    assert jira_client._project_key() == "FROMFILE"
+
+
+def test_project_key_raises_when_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JIRA_PROJECT_KEY", raising=False)
+    with pytest.raises(KeyError):
+        jira_client._project_key()
+
+
+# --- get_active_issues ---
+
 @pytest.mark.asyncio
 async def test_get_active_issues_returns_formatted_issues(tmp_path, monkeypatch):
     config = {"fetch_statuses": ["To Do", "In Progress"], "max_results": 10}
     config_file = tmp_path / "config.json"
     config_file.write_text(json.dumps(config))
     monkeypatch.setattr(jira_client, "CONFIG_PATH", config_file)
+    monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
 
     monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
     monkeypatch.setenv("JIRA_EMAIL", "user@test.com")
@@ -116,7 +183,7 @@ async def test_get_active_issues_returns_formatted_issues(tmp_path, monkeypatch)
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.post = AsyncMock(return_value=mock_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
         issues = await jira_client.get_active_issues()
@@ -130,10 +197,46 @@ async def test_get_active_issues_returns_formatted_issues(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_get_active_issues_project_config_overrides_fetch_statuses(tmp_path, monkeypatch):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"fetch_statuses": ["To Do", "In Progress"], "max_results": 50}))
+    monkeypatch.setattr(jira_client, "CONFIG_PATH", config_file)
+    monkeypatch.setattr(jira_client, "_find_project_config", lambda: {"project_key": "PROJ", "fetch_statuses": ["In Review"]})
+
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"issues": []}
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    captured = {}
+
+    async def capture_post(url, **kwargs):
+        captured["jql"] = kwargs.get("json", {}).get("jql", "")
+        return mock_response
+
+    mock_client.post = capture_post
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await jira_client.get_active_issues()
+
+    assert '"In Review"' in captured["jql"]
+    assert "In Progress" not in captured["jql"]
+
+
+@pytest.mark.asyncio
 async def test_get_active_issues_empty(tmp_path, monkeypatch):
     config_file = tmp_path / "config.json"
     config_file.write_text(json.dumps({"fetch_statuses": ["To Do"], "max_results": 10}))
     monkeypatch.setattr(jira_client, "CONFIG_PATH", config_file)
+    monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
 
     monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
     monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
@@ -147,7 +250,7 @@ async def test_get_active_issues_empty(tmp_path, monkeypatch):
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.post = AsyncMock(return_value=mock_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
         issues = await jira_client.get_active_issues()
@@ -159,6 +262,7 @@ async def test_get_active_issues_empty(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_issue_detail(monkeypatch):
+    monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
     monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
     monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
     monkeypatch.setenv("JIRA_API_TOKEN", "t")

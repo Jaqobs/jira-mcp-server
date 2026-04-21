@@ -18,6 +18,18 @@ def _load_config() -> dict:
         return json.load(f)
 
 
+def _find_project_config() -> dict:
+    """Walk up from cwd looking for .jira.json, stopping at the git root."""
+    for directory in [Path.cwd(), *Path.cwd().parents]:
+        candidate = directory / ".jira.json"
+        if candidate.exists():
+            with open(candidate) as f:
+                return json.load(f)
+        if (directory / ".git").exists():
+            break
+    return {}
+
+
 def _auth_header() -> dict[str, str]:
     email = os.environ["JIRA_EMAIL"]
     token = os.environ["JIRA_API_TOKEN"]
@@ -30,13 +42,23 @@ def _base_url() -> str:
 
 
 def _project_key() -> str:
-    return os.environ["JIRA_PROJECT_KEY"]
+    project_config = _find_project_config()
+    if "project_key" in project_config:
+        return project_config["project_key"]
+    key = os.environ.get("JIRA_PROJECT_KEY")
+    if not key:
+        raise KeyError(
+            "Jira project key not found. Add a .jira.json file to your project root "
+            'with {"project_key": "PROJ"} or set JIRA_PROJECT_KEY in your .env file.'
+        )
+    return key
 
 
 async def get_active_issues() -> list[dict[str, Any]]:
     config = _load_config()
-    statuses = config.get("fetch_statuses", ["To Do", "In Progress"])
-    max_results = config.get("max_results", 50)
+    project_config = _find_project_config()
+    statuses = project_config.get("fetch_statuses", config.get("fetch_statuses", ["To Do", "In Progress"]))
+    max_results = project_config.get("max_results", config.get("max_results", 50))
 
     status_jql = " OR ".join(f'status = "{s}"' for s in statuses)
     jql = f'project = "{_project_key()}" AND ({status_jql}) ORDER BY updated DESC'
