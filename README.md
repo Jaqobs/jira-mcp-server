@@ -63,18 +63,7 @@ You can also override the default fetch settings per project:
 
 Status names are case-sensitive and must match exactly what appears in Jira. If no `.jira.json` is found, the server falls back to the `JIRA_PROJECT_KEY` environment variable.
 
-### 4. Configure global defaults (optional)
-
-Edit `config.json` in the server directory to set the default statuses and result limit used when a project does not override them:
-
-```json
-{
-  "fetch_statuses": ["To Do", "In Progress"],
-  "max_results": 50
-}
-```
-
-### 5. Register with Claude Code
+### 4. Register with Claude Code
 
 ```bash
 claude mcp add jira \
@@ -116,7 +105,6 @@ ACME-42: Add user authentication flow
 ```
 ├── server.py              # MCP server — registers tools
 ├── jira_client.py         # Async Jira REST API v3 client
-├── config.json            # Global default statuses and result limit
 ├── .env.example           # Credential template
 ├── .jira.json.example     # Per-project config template
 ├── requirements.txt

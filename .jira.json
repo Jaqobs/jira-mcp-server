@@ -1,4 +1,5 @@
 {
+  "project_key": "L4P",
   "fetch_statuses": ["To Do", "In Progress"],
-  "max_results": 50
+  "max_results": 20
 }

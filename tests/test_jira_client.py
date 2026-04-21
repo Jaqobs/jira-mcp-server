@@ -165,10 +165,6 @@ def test_project_key_raises_when_missing(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_active_issues_returns_formatted_issues(tmp_path, monkeypatch):
-    config = {"fetch_statuses": ["To Do", "In Progress"], "max_results": 10}
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps(config))
-    monkeypatch.setattr(jira_client, "CONFIG_PATH", config_file)
     monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
 
     monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
@@ -198,9 +194,6 @@ async def test_get_active_issues_returns_formatted_issues(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_get_active_issues_project_config_overrides_fetch_statuses(tmp_path, monkeypatch):
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps({"fetch_statuses": ["To Do", "In Progress"], "max_results": 50}))
-    monkeypatch.setattr(jira_client, "CONFIG_PATH", config_file)
     monkeypatch.setattr(jira_client, "_find_project_config", lambda: {"project_key": "PROJ", "fetch_statuses": ["In Review"]})
 
     monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
@@ -233,9 +226,6 @@ async def test_get_active_issues_project_config_overrides_fetch_statuses(tmp_pat
 
 @pytest.mark.asyncio
 async def test_get_active_issues_empty(tmp_path, monkeypatch):
-    config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps({"fetch_statuses": ["To Do"], "max_results": 10}))
-    monkeypatch.setattr(jira_client, "CONFIG_PATH", config_file)
     monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
 
     monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")

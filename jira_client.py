@@ -10,14 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
-
-
-def _load_config() -> dict:
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
-
-
 def _find_project_config() -> dict:
     """Walk up from cwd looking for .jira.json, stopping at the git root."""
     for directory in [Path.cwd(), *Path.cwd().parents]:
@@ -55,10 +47,9 @@ def _project_key() -> str:
 
 
 async def get_active_issues() -> list[dict[str, Any]]:
-    config = _load_config()
     project_config = _find_project_config()
-    statuses = project_config.get("fetch_statuses", config.get("fetch_statuses", ["To Do", "In Progress"]))
-    max_results = project_config.get("max_results", config.get("max_results", 50))
+    statuses = project_config.get("fetch_statuses", ["To Do", "In Progress"])
+    max_results = project_config.get("max_results", 50)
 
     status_jql = " OR ".join(f'status = "{s}"' for s in statuses)
     jql = f'project = "{_project_key()}" AND ({status_jql}) ORDER BY updated DESC'
