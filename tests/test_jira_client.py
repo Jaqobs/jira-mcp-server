@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -54,6 +55,119 @@ def _make_detail_response(key="PROJ-1"):
             "updated": "2024-03-16T08:00:00.000+0000",
         },
     }
+
+
+# --- _get_auth_headers / _fetch_oauth_token ---
+
+@pytest.mark.asyncio
+async def test_get_auth_headers_uses_basic_when_no_client_creds(monkeypatch):
+    monkeypatch.delenv("JIRA_CLIENT_ID", raising=False)
+    monkeypatch.delenv("JIRA_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("JIRA_EMAIL", "user@test.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "mytoken")
+    headers = await jira_client._get_auth_headers()
+    assert headers["Authorization"].startswith("Basic ")
+
+
+@pytest.mark.asyncio
+async def test_get_auth_headers_uses_bearer_when_client_creds_set(monkeypatch):
+    monkeypatch.setenv("JIRA_CLIENT_ID", "cid")
+    monkeypatch.setenv("JIRA_CLIENT_SECRET", "csecret")
+    monkeypatch.setattr(jira_client, "_fetch_oauth_token", AsyncMock(return_value="myoauthtoken"))
+    headers = await jira_client._get_auth_headers()
+    assert headers["Authorization"] == "Bearer myoauthtoken"
+
+
+@pytest.mark.asyncio
+async def test_fetch_oauth_token_calls_atlassian_and_caches(monkeypatch):
+    monkeypatch.setenv("JIRA_CLIENT_ID", "cid")
+    monkeypatch.setenv("JIRA_CLIENT_SECRET", "csecret")
+    jira_client._oauth_token_cache["token"] = None
+    jira_client._oauth_token_cache["expires_at"] = 0.0
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"access_token": "tok123", "expires_in": 3600}
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        token = await jira_client._fetch_oauth_token()
+
+    assert token == "tok123"
+    assert jira_client._oauth_token_cache["token"] == "tok123"
+    assert jira_client._oauth_token_cache["expires_at"] > time.time()
+    url = mock_client.post.call_args.args[0]
+    assert url == "https://auth.atlassian.com/oauth/token"
+    body = mock_client.post.call_args.kwargs["json"]
+    assert body["grant_type"] == "client_credentials"
+    assert body["client_id"] == "cid"
+
+
+@pytest.mark.asyncio
+async def test_api_base_returns_base_url_for_basic_auth(monkeypatch):
+    monkeypatch.delenv("JIRA_CLIENT_ID", raising=False)
+    monkeypatch.delenv("JIRA_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    result = await jira_client._api_base()
+    assert result == "https://test.atlassian.net"
+
+
+@pytest.mark.asyncio
+async def test_api_base_returns_cloud_url_for_oauth(monkeypatch):
+    monkeypatch.setenv("JIRA_CLIENT_ID", "cid")
+    monkeypatch.setenv("JIRA_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    jira_client._cloud_id_cache = None
+
+    monkeypatch.setattr(jira_client, "_fetch_oauth_token", AsyncMock(return_value="tok"))
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = [{"id": "cloud-abc", "url": "https://test.atlassian.net"}]
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await jira_client._api_base()
+
+    assert result == "https://api.atlassian.com/ex/jira/cloud-abc"
+    assert jira_client._cloud_id_cache == "cloud-abc"
+
+
+@pytest.mark.asyncio
+async def test_api_base_uses_cached_cloud_id(monkeypatch):
+    monkeypatch.setenv("JIRA_CLIENT_ID", "cid")
+    monkeypatch.setenv("JIRA_CLIENT_SECRET", "csecret")
+    jira_client._cloud_id_cache = "cached-cloud-id"
+
+    mock_client = AsyncMock()
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await jira_client._api_base()
+
+    assert result == "https://api.atlassian.com/ex/jira/cached-cloud-id"
+    mock_client.__aenter__.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fetch_oauth_token_uses_cache_when_valid(monkeypatch):
+    monkeypatch.setenv("JIRA_CLIENT_ID", "cid")
+    monkeypatch.setenv("JIRA_CLIENT_SECRET", "csecret")
+    jira_client._oauth_token_cache["token"] = "cached_token"
+    jira_client._oauth_token_cache["expires_at"] = time.time() + 600
+
+    mock_client = AsyncMock()
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        token = await jira_client._fetch_oauth_token()
+
+    assert token == "cached_token"
+    mock_client.__aenter__.assert_not_called()
 
 
 # --- _extract_text ---
@@ -259,13 +373,13 @@ async def test_get_issue_detail(monkeypatch):
     monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
 
     mock_response = MagicMock()
-    mock_response.json.return_value = _make_detail_response("PROJ-5")
+    mock_response.json.return_value = {"issues": [_make_detail_response("PROJ-5")]}
     mock_response.raise_for_status = MagicMock()
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.post = AsyncMock(return_value=mock_response)
 
     with patch("httpx.AsyncClient", return_value=mock_client):
         detail = await jira_client.get_issue_detail("PROJ-5")
@@ -277,3 +391,269 @@ async def test_get_issue_detail(monkeypatch):
     assert detail["comments"][0]["body"] == "Reproduced."
     assert isinstance(detail["created_ts"], int)
     assert detail["url"] == "https://test.atlassian.net/browse/PROJ-5"
+    body = mock_client.post.call_args.kwargs["json"]
+    assert body["issueIdsOrKeys"] == ["PROJ-5"]
+
+
+# --- _text_to_adf ---
+
+def test_text_to_adf_single_paragraph():
+    adf = jira_client._text_to_adf("Hello world")
+    assert adf["type"] == "doc"
+    assert adf["version"] == 1
+    assert adf["content"][0]["type"] == "paragraph"
+    assert adf["content"][0]["content"][0]["text"] == "Hello world"
+
+
+def test_text_to_adf_double_newline_splits_paragraphs():
+    adf = jira_client._text_to_adf("First para\n\nSecond para")
+    assert len(adf["content"]) == 2
+    assert adf["content"][0]["content"][0]["text"] == "First para"
+    assert adf["content"][1]["content"][0]["text"] == "Second para"
+
+
+def test_text_to_adf_single_newline_inserts_hard_break():
+    adf = jira_client._text_to_adf("Line one\nLine two")
+    inline = adf["content"][0]["content"]
+    types = [n["type"] for n in inline]
+    assert "hardBreak" in types
+    texts = [n.get("text") for n in inline if n["type"] == "text"]
+    assert "Line one" in texts
+    assert "Line two" in texts
+
+
+def test_text_to_adf_empty_string_returns_empty_paragraph():
+    adf = jira_client._text_to_adf("")
+    assert adf["content"][0]["type"] == "paragraph"
+
+
+# --- create_issue ---
+
+@pytest.mark.asyncio
+async def test_create_issue_minimal(monkeypatch):
+    monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"issues": [{"key": "PROJ-42", "id": "10042"}], "errors": []}
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await jira_client.create_issue(summary="New task", issue_type="Task")
+
+    assert result["key"] == "PROJ-42"
+    assert result["url"] == "https://test.atlassian.net/browse/PROJ-42"
+    body = mock_client.post.call_args.kwargs["json"]
+    fields = body["issueUpdates"][0]["fields"]
+    assert fields["summary"] == "New task"
+    assert fields["issuetype"]["name"] == "Task"
+    assert fields["project"]["key"] == "PROJ"
+
+
+@pytest.mark.asyncio
+async def test_create_issue_with_all_optional_fields(monkeypatch):
+    monkeypatch.setattr(jira_client, "_find_project_config", lambda: {})
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"issues": [{"key": "PROJ-43", "id": "10043"}], "errors": []}
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await jira_client.create_issue(
+            summary="Child story",
+            issue_type="Story",
+            description="Some details",
+            labels=["backend", "api"],
+            assignee_account_id="abc123",
+            priority="High",
+            parent_key="PROJ-10",
+        )
+
+    assert result["key"] == "PROJ-43"
+    body = mock_client.post.call_args.kwargs["json"]
+    fields = body["issueUpdates"][0]["fields"]
+    assert fields["labels"] == ["backend", "api"]
+    assert fields["assignee"] == {"id": "abc123"}
+    assert fields["priority"] == {"name": "High"}
+    assert fields["parent"] == {"key": "PROJ-10"}
+    assert fields["description"]["type"] == "doc"
+
+
+# --- update_issue ---
+
+@pytest.mark.asyncio
+async def test_update_issue_summary_and_labels(monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.status_code = 204
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.put = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await jira_client.update_issue(
+            "PROJ-5",
+            summary="Updated title",
+            add_labels=["frontend"],
+            remove_labels=["backend"],
+        )
+
+    body = mock_client.put.call_args.kwargs["json"]
+    assert body["fields"]["summary"] == "Updated title"
+    label_ops = body["update"]["labels"]
+    assert {"add": "frontend"} in label_ops
+    assert {"remove": "backend"} in label_ops
+
+
+@pytest.mark.asyncio
+async def test_update_issue_no_fields_sends_empty_body(monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.put = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await jira_client.update_issue("PROJ-5")
+
+    body = mock_client.put.call_args.kwargs["json"]
+    assert body == {}
+
+
+# --- transition_issue ---
+
+@pytest.mark.asyncio
+async def test_transition_issue_success(monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    transitions_response = MagicMock()
+    transitions_response.raise_for_status = MagicMock()
+    transitions_response.json.return_value = {
+        "transitions": [
+            {"id": "11", "to": {"name": "In Progress"}},
+            {"id": "21", "to": {"name": "Done"}},
+        ]
+    }
+    post_response = MagicMock()
+    post_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=transitions_response)
+    mock_client.post = AsyncMock(return_value=post_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        new_status = await jira_client.transition_issue("PROJ-5", "in progress")
+
+    assert new_status == "In Progress"
+    post_body = mock_client.post.call_args.kwargs["json"]
+    assert post_body["transition"]["id"] == "11"
+
+
+@pytest.mark.asyncio
+async def test_transition_issue_not_found_raises(monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    transitions_response = MagicMock()
+    transitions_response.raise_for_status = MagicMock()
+    transitions_response.json.return_value = {
+        "transitions": [{"id": "21", "to": {"name": "Done"}}]
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(return_value=transitions_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        with pytest.raises(ValueError, match="No transition to 'Nonexistent'"):
+            await jira_client.transition_issue("PROJ-5", "Nonexistent")
+
+
+# --- add_comment ---
+
+@pytest.mark.asyncio
+async def test_add_comment(monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "id": "100001",
+        "created": "2024-03-20T12:00:00.000+0000",
+    }
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await jira_client.add_comment("PROJ-5", "Looks good to me!")
+
+    assert result["comment_id"] == "100001"
+    assert result["created_iso"] == "2024-03-20T12:00:00.000+0000"
+    assert isinstance(result["created_ts"], int)
+    body = mock_client.post.call_args.kwargs["json"]
+    assert body["body"]["type"] == "doc"
+
+
+# --- update_comment ---
+
+@pytest.mark.asyncio
+async def test_update_comment(monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "https://test.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "u@t.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "t")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.put = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await jira_client.update_comment("PROJ-5", "100001", "Revised comment text")
+
+    url = mock_client.put.call_args.args[0]
+    assert "comment/100001" in url
+    body = mock_client.put.call_args.kwargs["json"]
+    assert body["body"]["type"] == "doc"
